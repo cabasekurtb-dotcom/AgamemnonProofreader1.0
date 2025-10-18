@@ -3,7 +3,7 @@ import google.generativeai as genai
 import json
 import re
 import html
-import os  # Import os for potential future use, though not strictly needed here
+import json5
 
 # ---- SETUP ----
 st.set_page_config(
@@ -16,15 +16,13 @@ st.title("Agamemnon Proofreader")
 st.caption("Property of Kurt 'Isko' Cabase")
 
 # ---- LOAD API KEY AND CONFIGURE ----
-# IMPORTANT: API Key is loaded from Streamlit secrets
 try:
     API_KEY = st.secrets["general"]["GEMINI_API_KEY"]
     genai.configure(api_key=API_KEY)
 except Exception:
-    # Fallback/error handling if API key is missing
     st.error("Gemini API Key not found in Streamlit secrets. Please check your configuration.")
 
-MODEL_NAME = "gemini-2.5-flash"  # Use the plain model name for the SDK
+MODEL_NAME = "gemini-2.5-flash"
 
 # ---- SESSION STATE ----
 if "results" not in st.session_state:
@@ -39,7 +37,6 @@ if "applied_edits" not in st.session_state:
 # ---- UPLOAD TEXT FILE ----
 uploaded_file = st.file_uploader("Upload your .txt file", type="txt")
 if uploaded_file:
-    # Ensure the file is read only once upon upload
     if uploaded_file.name != st.session_state.get('last_uploaded_name'):
         st.session_state.text_input = uploaded_file.read().decode("utf-8")
         st.session_state.last_uploaded_name = uploaded_file.name
@@ -47,8 +44,7 @@ if uploaded_file:
 
 # ---- PROOFREAD FUNCTION ----
 def proofread_text(text):
-    # System instruction guiding the model to the desired JSON format
-    system_instruction = """
+    prompt_text = f"""
     You are a professional proofreader. 
     Analyze the provided text and identify grammatical, spelling, and stylistic errors.
     For each error, return ONLY a valid JSON array of objects with the following three types of operations:
@@ -58,47 +54,33 @@ def proofread_text(text):
 
     Structure MUST be:
     [
-      {
+      {{
         "operation": "replace | add | remove",
         "original": "...",  // The exact text to find (leave empty if adding)
         "corrected": "...",  // The new text (leave empty if removing)
         "reason": "..."      // Brief explanation
-      },
+      }},
       // ... more objects
     ]
+
+    Text to proofread:
+    {text}
     """
 
-    # --- FIX APPLIED HERE: Using genai.Client() is removed. ---
-    # We call the generation function directly using the configured API key.
-
-    # Configuring the response to be JSON
-    generation_config = {
-        "response_mime_type": "application/json",
-        "response_schema": {
-            "type": "ARRAY",
-            "items": {
-                "type": "OBJECT",
-                "properties": {
-                    "operation": {"type": "STRING", "enum": ["replace", "add", "remove"]},
-                    "original": {"type": "STRING"},
-                    "corrected": {"type": "STRING"},
-                    "reason": {"type": "STRING"}
-                },
-                "required": ["operation", "original", "corrected", "reason"],
-            }
-        },
-    }
-
     try:
-        response = genai.generate_content(  # Directly use the top-level SDK function
-            model=MODEL_NAME,
-            contents=[{"role": "user", "parts": [{"text": f"Proofread this text:\n\n{text}"}]}],
-            system_instruction=system_instruction,
-            config=generation_config
-        )
+        model = genai.GenerativeModel(model_name=MODEL_NAME)
+        response = model.generate_content(prompt_text)
 
-        raw_json = response.text.strip()
-        return json.loads(raw_json)
+        raw = response.text.strip()
+
+        # Robustly extract JSON using regex
+        match = re.search(r'(\[.*\])', raw, re.DOTALL)
+        if match:
+            raw = match.group(0)
+            return json.loads(raw)
+        else:
+            st.error(f"Model did not return valid JSON structure. Raw response text: {raw[:500]}...")
+            return []
 
     except Exception as e:
         st.error(f"Error during content generation: {e}")
@@ -157,7 +139,8 @@ with col1:
                     st.session_state.proofread_done = True
                     st.session_state.applied_edits = {i: None for i in range(len(st.session_state.results))}
                 else:
-                    st.error("No corrections found or model returned invalid data.")
+                    if not st.session_state.results:
+                        st.error("No corrections found or model returned invalid data.")
 
 with col2:
     if st.button("Clear Highlights"):
@@ -180,25 +163,19 @@ with col3:
 with col4:
     if st.button("Download Final Text"):
         final_text = st.session_state.text_input
-        # Apply accepted edits
         for idx, decision in st.session_state.applied_edits.items():
             if decision == "accept":
                 edit = st.session_state.results[idx]
                 op = edit.get("operation", "replace")
 
-                # NOTE: Applying edits using simple string replace is error-prone, but maintained here for fidelity to the original logic.
                 original_to_find = edit.get("original", "").strip()
                 corrected_to_insert = edit.get("corrected", "").strip()
 
                 if op == "replace":
-                    # Only replace if the original text is found
                     final_text = final_text.replace(original_to_find, corrected_to_insert)
                 elif op == "remove":
-                    # Remove the original text
                     final_text = final_text.replace(original_to_find, "")
                 elif op == "add":
-                    # For adding, we need an insertion point. Since the original app's logic
-                    # for 'add' is flawed (appending to the end), we maintain that but warn the user.
                     st.warning("The 'Add' operation applied here only appends text to the end of the document.")
                     final_text += " " + corrected_to_insert
 
@@ -213,7 +190,7 @@ with col4:
 if st.session_state.proofread_done:
     highlighted_text = st.session_state.text_input
 
-    # Sort results to apply replacements on un-replaced text
+    # Sort results to process longest strings first to avoid partial matches
     sorted_results = sorted(enumerate(st.session_state.results), key=lambda x: len(x[1].get('original', '')),
                             reverse=True)
 
@@ -222,38 +199,33 @@ if st.session_state.proofread_done:
         display_text = edit["original"] if op != "add" else "(Insertion Point)"
 
         if display_text and display_text != "(Insertion Point)":
-            # Highlight only if it's a replacement or removal (i.e., we have original text)
             escaped_text = re.escape(display_text)
 
-            # Use the decision from session state for styling
             decision = st.session_state.applied_edits.get(idx, None)
 
             if decision == "accept":
-                highlight_style = "background-color:#b9f6ca; color:#000000;"  # Light Green
+                highlight_style = "background-color:#b9f6ca; color:#000000;"
             elif decision == "reject":
-                highlight_style = "background-color:#ff8a80; color:#000000; text-decoration: line-through;"  # Light Red
+                highlight_style = "background-color:#ff8a80; color:#000000; text-decoration: line-through;"
             else:
-                highlight_style = "background-color:#ffeb3b; color:#000000;"  # Yellow (Pending)
+                highlight_style = "background-color:#ffeb3b; color:#000000;"
 
             tooltip_safe = html.escape(f"{op.upper()}: {edit.get('reason', '')}".replace("\n", " "))
 
-            # Use re.sub to find and replace instances of the exact original text
-            # This is safer than simple string replace for multiple instances
+            replacement = f"<span style='{highlight_style}' title='{tooltip_safe}'>{display_text}</span>"
+
             try:
-                # We use a lambda function in re.sub to ensure only the first match is replaced
-                # if we were tracking edits, but here we just highlight all instances.
+                # Use re.sub to find and replace instances
                 highlighted_text = re.sub(
-                    r'(?<!<span[^>]*>)' + escaped_text,  # Lookbehind to avoid replacing within existing tags
+                    r'(?<!<span[^>]*>)' + escaped_text,
                     replacement,
                     highlighted_text,
                     count=1
-                    # Only replace the first instance to avoid overlapping highlights, though this is still tricky.
                 )
             except:
-                # Fallback to simple replace if regex fails
                 highlighted_text = highlighted_text.replace(display_text, replacement)
 
-        # Display buttons for *every* edit, regardless of highlighting strategy
+        # Display buttons for *every* edit
         col_a, col_b = st.columns([1, 1])
 
         with col_a:
