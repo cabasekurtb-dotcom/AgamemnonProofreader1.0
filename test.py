@@ -3,6 +3,7 @@ import google.generativeai as genai
 import json
 import re
 import html
+import os  # Import os for potential future use, though not strictly needed here
 
 # ---- SETUP ----
 st.set_page_config(
@@ -14,10 +15,15 @@ st.set_page_config(
 st.title("Agamemnon Proofreader")
 st.caption("Property of Kurt 'Isko' Cabase")
 
-# ---- LOAD API KEY ----
+# ---- LOAD API KEY AND CONFIGURE ----
 # IMPORTANT: API Key is loaded from Streamlit secrets
-API_KEY = st.secrets["general"]["GEMINI_API_KEY"]
-genai.configure(api_key=API_KEY)
+try:
+    API_KEY = st.secrets["general"]["GEMINI_API_KEY"]
+    genai.configure(api_key=API_KEY)
+except Exception:
+    # Fallback/error handling if API key is missing
+    st.error("Gemini API Key not found in Streamlit secrets. Please check your configuration.")
+
 MODEL_NAME = "gemini-2.5-flash"  # Use the plain model name for the SDK
 
 # ---- SESSION STATE ----
@@ -62,8 +68,8 @@ def proofread_text(text):
     ]
     """
 
-    # Use the gemini-2.5-flash model
-    client = genai.Client()
+    # --- FIX APPLIED HERE: Using genai.Client() is removed. ---
+    # We call the generation function directly using the configured API key.
 
     # Configuring the response to be JSON
     generation_config = {
@@ -84,23 +90,22 @@ def proofread_text(text):
     }
 
     try:
-        response = client.models.generate_content(
+        response = genai.generate_content(  # Directly use the top-level SDK function
             model=MODEL_NAME,
             contents=[{"role": "user", "parts": [{"text": f"Proofread this text:\n\n{text}"}]}],
             system_instruction=system_instruction,
             config=generation_config
         )
 
-        # The response text will be a valid JSON string due to response_mime_type="application/json"
         raw_json = response.text.strip()
         return json.loads(raw_json)
 
     except Exception as e:
-        st.error(f"Error calling Gemini API: {e}")
+        st.error(f"Error during content generation: {e}")
         return []
 
 
-# ---- CONVERSION FUNCTION (New) ----
+# ---- CONVERSION FUNCTION (for Docs App) ----
 def convert_to_docs_format(proofreader_edits):
     """
     Converts the proofreader's rich JSON (with 'operation')
@@ -161,7 +166,7 @@ with col2:
         st.session_state.proofread_done = False
         st.session_state.applied_edits = {}
 
-# New Button to Download Compatible JSON
+# Download Button to generate compatible JSON
 with col3:
     if st.session_state.results:
         docs_format_json = convert_to_docs_format(st.session_state.results)
@@ -232,14 +237,24 @@ if st.session_state.proofread_done:
 
             tooltip_safe = html.escape(f"{op.upper()}: {edit.get('reason', '')}".replace("\n", " "))
 
-            replacement = f"<span style='{highlight_style}' title='{tooltip_safe}'>{display_text}</span>"
-
-            # Simple string replacement for display highlighting
-            highlighted_text = highlighted_text.replace(display_text, replacement)
+            # Use re.sub to find and replace instances of the exact original text
+            # This is safer than simple string replace for multiple instances
+            try:
+                # We use a lambda function in re.sub to ensure only the first match is replaced
+                # if we were tracking edits, but here we just highlight all instances.
+                highlighted_text = re.sub(
+                    r'(?<!<span[^>]*>)' + escaped_text,  # Lookbehind to avoid replacing within existing tags
+                    replacement,
+                    highlighted_text,
+                    count=1
+                    # Only replace the first instance to avoid overlapping highlights, though this is still tricky.
+                )
+            except:
+                # Fallback to simple replace if regex fails
+                highlighted_text = highlighted_text.replace(display_text, replacement)
 
         # Display buttons for *every* edit, regardless of highlighting strategy
         col_a, col_b = st.columns([1, 1])
-        button_label = f"({op.upper()}) {display_text}: {edit.get('reason', '')}"
 
         with col_a:
             if st.button(f"Accept: {op.upper()}", key=f"accept_{idx}", disabled=(decision == "accept")):
