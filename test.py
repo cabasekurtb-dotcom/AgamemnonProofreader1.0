@@ -20,6 +20,14 @@ genai.configure(api_key=API_KEY)
 
 MODEL_NAME = "models/gemini-2.5-flash"
 
+# ---- INITIALIZE SESSION STATE ----
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "proofread_done" not in st.session_state:
+    st.session_state.proofread_done = False
+if "text_input" not in st.session_state:
+    st.session_state.text_input = ""
+
 # ---- PROOFREAD FUNCTION ----
 def proofread_text(text):
     model = genai.GenerativeModel(MODEL_NAME)
@@ -50,53 +58,55 @@ def proofread_text(text):
         return []
 
 # ---- INTERFACE ----
-text_input = st.text_area("️ Paste your story or passage below:", height=300)
+st.session_state.text_input = st.text_area(
+    "️ Paste your story or passage below:",
+    value=st.session_state.text_input,
+    height=300
+)
 
-# Buttons container
+# ---- BUTTONS ----
 col1, col2, col3 = st.columns([1,1,1])
-proofread_done = False
-results = []
 
 with col1:
     if st.button("Proofread"):
-        if not text_input.strip():
+        if not st.session_state.text_input.strip():
             st.warning("Please enter some text first!")
         else:
             with st.spinner("Analyzing text..."):
-                results = proofread_text(text_input)
-                if results:
+                st.session_state.results = proofread_text(st.session_state.text_input)
+                if st.session_state.results:
                     st.success("Proofreading complete!")
-                    proofread_done = True
+                    st.session_state.proofread_done = True
                 else:
                     st.error("No corrections found or model returned invalid data.")
 
 with col2:
     if st.button("Clear Highlights"):
-        text_input = ""
-        results = []
-        proofread_done = False
+        st.session_state.text_input = ""
+        st.session_state.results = []
+        st.session_state.proofread_done = False
 
 with col3:
     if st.button("Copy Edits"):
-        if results:
-            edits_text = "\n".join([f"{r['original']} -> {r['corrected']} ({r['reason']})" for r in results])
+        if st.session_state.results:
+            edits_text = "\n".join([
+                f"{r['original']} -> {r['corrected']} ({r['reason']})"
+                for r in st.session_state.results
+            ])
             st.text_area("Copy the edits below:", value=edits_text, height=200)
         else:
             st.warning("No edits to copy. Proofread first!")
 
 # ---- DISPLAY ORIGINAL TEXT WITH HIGHLIGHTS AND TOOLTIPS ----
-if proofread_done:
-    highlighted_text = text_input
+if st.session_state.proofread_done:
+    highlighted_text = st.session_state.text_input
 
-    for edit in results:
+    for edit in st.session_state.results:
         # Escape regex special characters
         escaped_original = re.escape(edit["original"])
-
         # Escape tooltip text for HTML
         tooltip_safe = html.escape(edit["reason"].replace("\n", " "))
-
         replacement = f"<span style='background-color:#ffeb3b;' title='{tooltip_safe}'>{edit['original']}</span>"
-
         # Replace all exact matches
         highlighted_text = re.sub(escaped_original, replacement, highlighted_text)
 
